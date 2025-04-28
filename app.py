@@ -46,5 +46,6 @@ def get_sensor_data():
 
 # 啟動 Flask 應用和 MQTT 客戶端
 if __name__ == '__main__':
-    start_mqtt()  # 啟動 MQTT 客戶端
-    app.run(debug=True, use_reloader=False)  # 啟動 Flask 應用
+    start_mqtt()
+    port = int(os.environ.get('PORT', 5000))  # 取得 Render 給的 PORT 環境變數，找不到就預設 5000
+    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
