@@ -1,5 +1,6 @@
 from flask import Flask, jsonify
 import paho.mqtt.client as mqtt
+import os
 
 # Flask 應用
 app = Flask(__name__)
