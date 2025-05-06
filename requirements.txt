@@ -1,2 +1,4 @@
 flask
 paho-mqtt
+numpy
+scipy
