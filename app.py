@@ -1,155 +1,115 @@
-import csv
-import json
-from flask import Flask, jsonify
-from flask import render_template_string, send_file
-import paho.mqtt.client as mqtt
-import os
+from flask import Flask, request, render_template_string
+import pandas as pd
 import numpy as np
-from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
-from datetime import datetime
+from scipy.signal import find_peaks, savgol_filter, butter, filtfilt
+from scipy.fftpack import fft
 
-# 初始化 Flask 應用
 app = Flask(__name__)
 
-# MQTT 設定
-MQTT_BROKER = 'broker.emqx.io'  # 使用公共 MQTT Broker
-MQTT_PORT = 1883                   # 默認端口
-MQTT_SUB_TOPIC = '/imu_data'     # App 發送數據的主題
-MQTT_PUB_TOPIC =  '/result'      # 發佈計算後的 BPM 主題
+# 高通濾波函式
+def highpass_filter(data, cutoff=0.01, fs=11, order=2):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    return filtfilt(b, a, data)
 
-# 儲存接收到的資料
-sensor_data_list = []
+# 呼吸分析函式（把你Colab邏輯包起來）
+def analyze_breath(df):
+    x_acc = df['XAcc'].values
+    sampling_rate = 11
 
-# 設定 CSV 檔案
-csv_filename = 'sensor_data.csv'
+    mid_index = len(x_acc) // 2
+    x_acc = x_acc[mid_index - 100: mid_index + 100]
+    sample_indices = np.arange(len(x_acc))
+    time_axis = sample_indices / sampling_rate
 
-# 設置 CSV 文件標題（如果文件不存在則創建）
-def initialize_csv():
-    if not os.path.isfile(csv_filename):
-        with open(csv_filename, mode='w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(["Timestamp", "UserID", "X", "Y", "Z"])
+    # 信號前處理
+    z_score = (x_acc - np.mean(x_acc)) / np.std(x_acc)
+    x_acc_clean = x_acc[np.abs(z_score) < 3]
 
-# MQTT 連線成功後訂閱主題
-def on_connect(client, userdata, flags, rc):
-    print(f"Connected with result code {rc}")
-    client.subscribe(MQTT_SUB_TOPIC)
+    if len(x_acc_clean) < 10:
+        return 0  # 若資料太少，回傳0
 
-# 保存數據到 CSV
-def save_to_csv(timestamp, user_id, x, y, z):
-    with open(csv_filename, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow([timestamp, user_id, x, y, z])
+    x_acc_detrended = highpass_filter(x_acc_clean, fs=sampling_rate)
+    x_acc_normalized = (x_acc_detrended - np.min(x_acc_detrended)) / (np.max(x_acc_detrended) - np.min(x_acc_detrended))
 
-# MQTT 訊息處理回調（處理接收到的數據並計算 BPM）
-def on_message(client, userdata, msg):
-    global sensor_data_list
-    try:
-        payload = msg.payload.decode('utf-8')
-        print(f"Received message: {payload}")
+    # 平滑濾波
+    x_acc_smooth = savgol_filter(x_acc_normalized, window_length=30, polyorder=3)
 
-        # 嘗試解析 JSON 格式
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            print(f"Warning: Invalid JSON format, unable to parse the payload: {payload}")
-            return
+    # 頻域分析(FFT)
+    N = len(x_acc_smooth)
+    xf = np.fft.fftfreq(N, 1 / sampling_rate)
+    yf = np.abs(fft(x_acc_smooth))
 
-        # 檢查資料是否包含 x, y, z
-        if isinstance(data, dict) and 'x' in data and 'y' in data and 'z' in data and 'timestamp' in data and 'userID' in data:
-            sensor_data_list.append(data)
-            print(f"Processed data: {data}")
+    valid_indices = (xf > 0.2) & (xf < 0.5)
+    if not np.any(valid_indices):
+        dominant_freq = 0.2  # 預設值
+    else:
+        dominant_freq = xf[valid_indices][np.argmax(yf[valid_indices])]
 
-            # 保存數據到 CSV
-            save_to_csv(data['timestamp'], data['userID'], data['x'], data['y'], data['z'])
+    expected_breath_period = 1 / dominant_freq if dominant_freq > 0 else 5
 
-        # 防止除以零錯誤：檢查是否有資料
-        if len(sensor_data_list) == 0:
-            print("Warning: No data to process.")
-            return
-
-        # 計算每分鐘的呼吸次數 (BPM)
-        bpm = calculate_bpm(sensor_data_list)
-
-        # 發佈計算結果到 MQTT
-        client.publish(MQTT_PUB_TOPIC, str(bpm))
-        print(f"Published BPM: {bpm}")
-
-    except Exception as e:
-        print(f"Error processing message: {e}")
-
-# 計算 BPM 的函數
-def calculate_bpm(sensor_data):
-    # 提取 X 軸加速度資料
-    x_acc = np.array([data['x'] for data in sensor_data])
-
-    # **1. 信號前處理**
-    # (1) 高通濾波
-    def highpass_filter(data, cutoff=0.01, fs=11, order=2):
-        nyq = 0.5 * fs
-        normal_cutoff = cutoff / nyq
-        b, a = butter(order, normal_cutoff, btype='high', analog=False)
-        return filtfilt(b, a, data)
-
-    x_acc_detrended = highpass_filter(x_acc, fs=11)
-
-    # (2) 平滑濾波 (Savitzky-Golay)
-    x_acc_smooth = savgol_filter(x_acc_detrended, window_length=30, polyorder=3)
-
-    # **2. 偵測呼吸峰值 (吸氣最高點)**
+    # 呼吸峰值偵測
     std_dev = np.std(x_acc_smooth)
     adaptive_threshold = 1.5 * std_dev
-    peaks, _ = find_peaks(x_acc_smooth, height=adaptive_threshold)
+    peaks, _ = find_peaks(x_acc_smooth, height=adaptive_threshold, distance=sampling_rate * expected_breath_period)
 
-    # **3. 計算呼吸間隔 (Peak-to-Peak)**
-    breath_intervals_samples = np.diff(peaks)  # 峰值間的樣本數
-    breath_intervals = breath_intervals_samples / 11  # 換算成秒
+    if len(peaks) < 2:
+        return 0
+
+    breath_intervals_samples = np.diff(peaks)
+    breath_intervals = breath_intervals_samples / sampling_rate
     bpm = 60 / np.mean(breath_intervals) if len(breath_intervals) > 1 else 0
 
-    return round(bpm, 2)
+    return bpm
 
-# MQTT 客戶端設置
-mqtt_client = mqtt.Client()
-mqtt_client.on_connect = on_connect
-mqtt_client.on_message = on_message
+# 簡易 HTML 模板
+HTML_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IMU 呼吸偵測分析</title>
+</head>
+<body>
+    <h1>上傳 CSV 檔案進行呼吸頻率分析</h1>
+    <form method="post" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".csv" required>
+        <input type="submit" value="上傳並分析">
+    </form>
+    {% if bpm is not none %}
+        <h2>計算結果：</h2>
+        {% if bpm > 0 %}
+            <p>每分鐘呼吸次數 (BPM)：<strong>{{ bpm | round(2) }}</strong></p>
+        {% else %}
+            <p>無法判斷有效的呼吸頻率，請確認上傳檔案的資料正確。</p>
+        {% endif %}
+    {% endif %}
+</body>
+</html>
+'''
 
-# 啟動 MQTT 並連接到 broker
-def start_mqtt():
-    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    mqtt_client.loop_start()
-
-# Flask 頁面（可選）
-@app.route('/')
-def home():
-    return 'Flask MQTT BPM Server is Running!'
-@app.route('/download')
-def download_csv():
-    try:
-        # 計算最新的 bpm（假設您之前已經有 sensor_data_list）
-        if sensor_data_list:
-            bpm = calculate_bpm(sensor_data_list)
-        else:
+@app.route("/", methods=["GET", "POST"])
+def upload_file():
+    bpm = None
+    if request.method == "POST":
+        if "file" not in request.files:
             bpm = 0
+        else:
+            file = request.files["file"]
+            if file.filename == "":
+                bpm = 0
+            else:
+                try:
+                    df = pd.read_csv(file)
+                    # 確認檔案中有XAcc欄位
+                    if 'XAcc' not in df.columns:
+                        bpm = 0
+                    else:
+                        bpm = analyze_breath(df)
+                except Exception as e:
+                    bpm = 0
+    return render_template_string(HTML_PAGE, bpm=bpm)
 
-        # 檢查 csv 是否存在
-        csv_exists = os.path.exists('sensor_data.csv')
-
-        # 用 HTML 顯示 BPM 與下載連結
-        html = f'''
-        <h2>目前 BPM：{bpm:.2f}</h2>
-        {'<a href="/get_csv" download>點我下載 sensor_data.csv</a>' if csv_exists else '<p>尚未產生 CSV 檔案</p>'}
-        '''
-        return render_template_string(html)
-
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-@app.route('/get_csv')
-def get_csv():
-    return send_file('sensor_data.csv', as_attachment=True)
-# 啟動 Flask 應用
 if __name__ == '__main__':
-    initialize_csv()  # 初始化 CSV
-    start_mqtt()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
