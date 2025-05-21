@@ -102,14 +102,23 @@ def upload_file():
             else:
                 try:
                     df = pd.read_csv(file)
-                    # 確認檔案中有XAcc欄位
-                    if 'XAcc' not in df.columns:
+                    
+                    # 新增印出欄位與前五筆資料，方便 debug
+                    print("Columns:", df.columns.tolist())
+                    print("Data preview:\n", df.head())
+                    
+                    # 你可以加強欄位名稱判斷
+                    cols = [c.strip().lower() for c in df.columns]
+                    if 'xacc' not in cols:
+                        print("Error: 'XAcc' column not found (case-insensitive check)")
                         bpm = 0
                     else:
                         bpm = analyze_breath(df)
                 except Exception as e:
+                    print("Error reading CSV:", e)
                     bpm = 0
     return render_template_string(HTML_PAGE, bpm=bpm)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
