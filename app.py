@@ -92,32 +92,29 @@ HTML_PAGE = '''
 @app.route("/", methods=["GET", "POST"])
 def upload_file():
     bpm = None
+    debug_html = ""
     if request.method == "POST":
         if "file" not in request.files:
             bpm = 0
+            debug_html = "No file part"
         else:
             file = request.files["file"]
             if file.filename == "":
                 bpm = 0
+                debug_html = "No selected file"
             else:
                 try:
                     df = pd.read_csv(file)
-                    
-                    # 新增印出欄位與前五筆資料，方便 debug
-                    print("Columns:", df.columns.tolist())
-                    print("Data preview:\n", df.head())
-                    
-                    # 你可以加強欄位名稱判斷
-                    cols = [c.strip().lower() for c in df.columns]
-                    if 'xacc' not in cols:
-                        print("Error: 'XAcc' column not found (case-insensitive check)")
+                    debug_html = f"Columns: {df.columns.tolist()}<br>Preview:<br>{df.head().to_html()}"
+                    if 'XAcc' not in df.columns:
                         bpm = 0
+                        debug_html += "<br>'XAcc' column missing"
                     else:
                         bpm = analyze_breath(df)
                 except Exception as e:
-                    print("Error reading CSV:", e)
                     bpm = 0
-    return render_template_string(HTML_PAGE, bpm=bpm)
+                    debug_html = f"Error: {e}"
+    return render_template_string(HTML_PAGE + "<hr>" + debug_html, bpm=bpm)
 
 
 if __name__ == '__main__':
