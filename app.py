@@ -104,7 +104,7 @@ def upload_file():
                 debug_html = "No selected file"
             else:
                 try:
-                    df = pd.read_csv(file)
+                    df = pd.read_csv(file, sep=',', skipinitialspace=True)
                     debug_html = f"Columns: {df.columns.tolist()}<br>Preview:<br>{df.head().to_html()}"
                     if 'XAcc' not in df.columns:
                         bpm = 0
