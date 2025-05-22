@@ -89,6 +89,17 @@ HTML_PAGE = '''
 </html>
 '''
 
+def clean_csv_file(file):
+    # 讀取原始二進位檔案內容
+    content = file.read().decode('utf-8')
+    # 清理每行末尾多餘逗號
+    lines = content.splitlines()
+    cleaned_lines = [line.rstrip(',') for line in lines]
+    cleaned_content = '\n'.join(cleaned_lines)
+    # 回傳成 StringIO 物件，讓 pandas 可以像檔案一樣讀取
+    from io import StringIO
+    return StringIO(cleaned_content)
+
 @app.route("/", methods=["GET", "POST"])
 def upload_file():
     bpm = None
@@ -96,25 +107,29 @@ def upload_file():
     if request.method == "POST":
         if "file" not in request.files:
             bpm = 0
-            debug_html = "No file part"
+            debug_html = "No file part in request."
         else:
             file = request.files["file"]
             if file.filename == "":
                 bpm = 0
-                debug_html = "No selected file"
+                debug_html = "No file selected."
             else:
                 try:
-                    df = pd.read_csv(file, sep=',', skipinitialspace=True)
+                    cleaned_file = clean_csv_file(file)
+                    df = pd.read_csv(cleaned_file)
                     debug_html = f"Columns: {df.columns.tolist()}<br>Preview:<br>{df.head().to_html()}"
-                    if 'XAcc' not in df.columns:
+                    cols = [c.strip().lower() for c in df.columns]
+                    if 'xacc' not in cols:
                         bpm = 0
-                        debug_html += "<br>'XAcc' column missing"
+                        debug_html += "<br>Error: 'XAcc' column not found."
                     else:
                         bpm = analyze_breath(df)
                 except Exception as e:
                     bpm = 0
-                    debug_html = f"Error: {e}"
+                    debug_html = f"Error reading CSV: {e}"
+
     return render_template_string(HTML_PAGE + "<hr>" + debug_html, bpm=bpm)
+
 
 
 if __name__ == '__main__':
